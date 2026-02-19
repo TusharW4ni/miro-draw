@@ -13,6 +13,7 @@ import {
   isBoundToContainer,
   isElbowArrow,
   isFrameLikeElement,
+  isArrowElement,
 } from "@excalidraw/element";
 import { getFrameChildren } from "@excalidraw/element";
 
@@ -23,7 +24,10 @@ import {
 
 import { CaptureUpdateAction } from "@excalidraw/element";
 
-import type { ExcalidrawElement } from "@excalidraw/element/types";
+import type {
+  ExcalidrawElement,
+  ExcalidrawArrowElement,
+} from "@excalidraw/element/types";
 
 import { t } from "../i18n";
 import { getSelectedElements, isSomeElementSelected } from "../scene";
@@ -186,6 +190,58 @@ const deleteSelectedElements = (
   };
 };
 
+const getDescendantIds = (
+  elements: readonly ExcalidrawElement[],
+  initialSelection: AppState["selectedElementIds"],
+): Set<string> => {
+  const ids = new Set(
+    Object.keys(initialSelection).filter((id) => initialSelection[id]),
+  );
+  const arrows = elements.filter(isArrowElement);
+
+  // Build a map of Parent -> [Arrows starting from Parent]
+  const outboundMap = new Map<string, ExcalidrawArrowElement[]>();
+  for (const arrow of arrows) {
+    if (arrow.startBinding) {
+      const startId = arrow.startBinding.elementId;
+      const existing = outboundMap.get(startId) || [];
+      existing.push(arrow);
+      outboundMap.set(startId, existing);
+    }
+  }
+
+  const queue = Array.from(ids);
+  while (queue.length > 0) {
+    const parentId = queue.shift()!;
+    const childrenArrows = outboundMap.get(parentId);
+    if (childrenArrows) {
+      for (const arrow of childrenArrows) {
+        if (!ids.has(arrow.id)) {
+          ids.add(arrow.id);
+        }
+        if (arrow.endBinding) {
+          const childId = arrow.endBinding.elementId;
+          if (!ids.has(childId)) {
+            ids.add(childId);
+            queue.push(childId);
+          }
+        }
+      }
+    }
+  }
+
+  // Also delete arrows pointing to the nodes being deleted
+  for (const arrow of arrows) {
+    if (arrow.endBinding && ids.has(arrow.endBinding.elementId)) {
+      if (!ids.has(arrow.id)) {
+        ids.add(arrow.id);
+      }
+    }
+  }
+
+  return ids;
+};
+
 const handleGroupEditingState = (
   appState: AppState,
   elements: readonly ExcalidrawElement[],
@@ -272,8 +328,20 @@ export const actionDeleteSelected = register({
       };
     }
 
+    const descendantIds = getDescendantIds(
+      elements,
+      appState.selectedElementIds,
+    );
+    const expandedSelection = { ...appState.selectedElementIds };
+    descendantIds.forEach((id) => (expandedSelection[id] = true));
+
+    const appStateWithExpandedSelection = {
+      ...appState,
+      selectedElementIds: expandedSelection,
+    };
+
     let { elements: nextElements, appState: nextAppState } =
-      deleteSelectedElements(elements, appState, app);
+      deleteSelectedElements(elements, appStateWithExpandedSelection, app);
 
     fixBindingsAfterDeletion(
       nextElements,
@@ -294,12 +362,7 @@ export const actionDeleteSelected = register({
         activeEmbeddable: null,
         selectedLinearElement: null,
       },
-      captureUpdate: isSomeElementSelected(
-        getNonDeletedElements(elements),
-        appState,
-      )
-        ? CaptureUpdateAction.IMMEDIATELY
-        : CaptureUpdateAction.EVENTUALLY,
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     };
   },
   keyTest: (event, appState, elements) =>
